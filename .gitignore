@@ -1,0 +1,15 @@
+# This repo ships .factory/ as SCAFFOLDING (tracked). Only true runtime junk is
+# ignored here. An importing project adds the runtime ignores from
+# templates/gitignore.snippet to its own .gitignore instead.
+.factory/runs/
+.factory/STOP
+
+# Maintainer-machine-only: the identifier scrub table (real identifiers live
+# ONLY here; format documented in scripts/scrub.example.tsv)
+scripts/scrub.local.tsv
+
+# Local junk
+.DS_Store
+node_modules/
+__pycache__/
+*.pyc

@@ -1,0 +1,8 @@
+source_repo: vox
+commit: 6d9f058b2573eeec9a17827fb058206cc2e057de
+synced_at: 2026-08-20T15:55:05Z
+template_source MISSION.md 3469e8ffd8a158e03600bc7c49dd7aa887186b7a
+template_source FACTORY_RULES.md 027d153ad7a2bd0a4ea860e243937a026ce19d87
+template_source FACTORY.md 588cbb1259cd43e47c4ca29ad442976fcc244ae4
+template_source CLAUDE.md 134ba3e4b424339b29faf42220f0512fa44d7db3
+template_source .factory/README.md 2ebfabb3029bec81fef13d258eb6b938c9fa0103

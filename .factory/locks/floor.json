@@ -1,0 +1,26 @@
+{
+  "_what_this_is": [
+    "THE RATCHET. Protected (.factory/locks/**, FACTORY_RULES §5) — only a human",
+    "commit moves these numbers. The gate asserts observed vs floor, and a second",
+    "check asserts floor(head) >= floor(base), so 'delete the assertion and",
+    "lower the number in the same commit' is not an available move.",
+    "",
+    "TWO POLICIES, chosen deliberately:",
+    "  exact — counts the harness itself owns (journey steps, holdout assertions,",
+    "          check families). observed != floor FAILS the gate, forcing the raise",
+    "          into the same human commit that accepted the new assertions. No slack",
+    "          can accumulate where slack is deletable-assertion budget.",
+    "  min   — the repo's organic test suites, which grow with nearly every commit.",
+    "          observed < floor fails; observed > floor prints FLOOR_SLACK so the",
+    "          gap stays visible every lap. Raise these on cadence, and any",
+    "          standing slack pins the autonomy dial per the checklist rule."
+  ],
+
+  "_seed_these": "Ships EMPTY. Seed every count from your project's own first honest green run, by human commit — inherited numbers from another project are meaningless here and would fail every gate.",
+
+  "exact": {},
+
+  "min": {},
+
+  "_raise_these": "In the same human commit that adds the assertions. If you find yourself lowering one, the question is what stopped being true."
+}

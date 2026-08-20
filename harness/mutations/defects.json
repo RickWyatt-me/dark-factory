@@ -1,0 +1,85 @@
+{
+  "_what_this_is": [
+    "Deliberate defects injected into REAL VOX source, one at a time, in place",
+    "(backed up byte-for-byte and restored — see run.py). Each must make the gate",
+    "go red. One that escapes is a class of bug that can currently merge with",
+    "nobody reading the diff.",
+    "",
+    "THIS FILE IS PROTECTED (FACTORY_RULES §5, harness/**). A builder that can",
+    "edit its own defect set can pass it.",
+    "",
+    "Every defect below is seeded from the R2.5a escaped-bug corpus — bugs that",
+    "actually got past VOX's visible checks — re-expressed as one-line mutations.",
+    "`catch` names the rung families expected to notice; the runner tries those",
+    "first and escalates to the full ladder before declaring an escape. At least",
+    "one defect aims at each rung, including above the independence line: a set",
+    "caught entirely by 'unit' proves only that the unit suite can fail."
+  ],
+
+  "defects": [
+    {
+      "id": "magnitude-detector-blinded",
+      "file": "tests/fidelity/kv-fidelity.mjs",
+      "find": "pattern: /\\b\\d+(?:\\.\\d+)?\\s?k?V(?![A-Za-z])/g,",
+      "replace": "pattern: /\\bQZ7TNEVER\\d+kV/g,",
+      "catch": ["fidelity"],
+      "why": "the kV guard is the proof case of the whole fidelity family; if a blinded detector still reports green, the guard's own discrimination (planted drifts MUST be caught) is not real and 13.2 kV can silently become 13.2 KV in a dispute-ready record"
+    },
+    {
+      "id": "dedup-eats-protected-sections",
+      "file": "supabase/functions/fn-report-compile/index.ts",
+      "find": "const DEDUP_PROTECTED_SECTIONS = new Set<number>([10, 12]);",
+      "replace": "const DEDUP_PROTECTED_SECTIONS = new Set<number>([]);",
+      "catch": ["ef_unit"],
+      "why": "the June-11 report bug verbatim: on high-volume days the dedup pass collapsed Schedule (§10) and Communications (§12) to 'See §X' stubs; if unprotecting them escapes, the busiest days lose their two forward-looking sections again"
+    },
+    {
+      "id": "all-failed-report-reads-distributed",
+      "file": "supabase/functions/fn-report-distribute/index.ts",
+      "find": "(r) => r.status !== \"pending\" && r.status !== \"failed\",",
+      "replace": "(r) => r.status !== \"pending\",",
+      "catch": ["holdout"],
+      "why": "Bucket-1 item 1.2 verbatim: counting failed recipients as delivered marks an undelivered report 'distributed' — the app says Sent for contract documentation nobody received. Aimed at the holdout on purpose: the above-the-line rung must be shown able to fail"
+    },
+    {
+      "id": "anon-fallback-guard-blinded",
+      "file": "src/services/entitlementSyncService.ts",
+      "find": "return Boolean(session?.access_token) && session?.user?.id === userId;",
+      "replace": "return true;",
+      "catch": ["unit"],
+      "why": "the 1.6a device-wipe trap: with the identity guard blinded, an anon-key fallback read of entitlements returns empty-with-200 and the client treats it as authoritative revocation — destruction authorized by an unauthenticated read"
+    },
+    {
+      "id": "citations-never-reach-the-user",
+      "file": "supabase/functions/fn-query/index.ts",
+      "find": "              if (src) {\n                emit(sseCitation({",
+      "replace": "              if (false && src) {\n                emit(sseCitation({",
+      "catch": ["e2e"],
+      "why": "the query path's whole claim is a sourced answer; if dropping every citation frame escapes, answers stream uncited and nothing below the E2E asserts the citation chain at all"
+    },
+    {
+      "id": "empty-corpus-still-answers",
+      "file": "supabase/functions/fn-query/index.ts",
+      "find": "      if (sources.length === 0) {",
+      "replace": "      if (false && sources.length === 0) {",
+      "catch": ["e2e"],
+      "why": "the honest-abstention contract: with the 0-row branch disabled, an unanswerable question goes to the model anyway and the system invents an answer instead of saying it has nothing — the exact failure the measured 0.35 floor exists to prevent"
+    },
+    {
+      "id": "a-stage-that-silently-no-ops",
+      "file": "supabase/functions/fn-ai-extract/index.ts",
+      "find": "await claimPipelineRun(supabase, payload.pipeline_run_id, \"cleaned\", \"extracting\");",
+      "replace": "await claimPipelineRun(supabase, payload.pipeline_run_id, \"checked\", \"extracting\");",
+      "catch": ["e2e"],
+      "why": "empty-is-not-pass wearing pipeline clothes: the claim never matches, the stage returns 200 'Already processing', and the run stalls at cleaned forever while every call reports success — only a journey that asserts each observable stage notices"
+    },
+    {
+      "id": "pdf-artifact-hollowed",
+      "file": "supabase/functions/fn-pdf-generate/index.ts",
+      "find": ".upload(storagePath, pdfBytes, {",
+      "replace": ".upload(storagePath, pdfBytes.slice(0, 0), {",
+      "catch": ["e2e"],
+      "why": "an output made constant (empty): the report row says pdf_generated with a pdf_url, every status check passes, and the artifact a stakeholder would open is zero bytes — only downloading the actual PDF catches it"
+    }
+  ]
+}

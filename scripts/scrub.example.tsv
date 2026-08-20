@@ -1,0 +1,9 @@
+# Example of scripts/scrub.local.tsv (which is gitignored and NEVER committed).
+# The local file maps real source-repo identifiers to placeholders at sync
+# time, keeping this repo free of them. Two record types, tab-separated:
+#   S<TAB>literal-in-source<TAB>replacement    (applied to factory/ + harness/)
+#   F<TAB>regex                                (post-scrub forbidden check; any
+#                                               hit fails the sync loudly)
+S	example-project-ref-1234	YOUR_PROJECT_REF
+S	owner@real-domain.example	owner@example.invalid
+F	real-domain

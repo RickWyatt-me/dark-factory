@@ -1,0 +1,11 @@
+# --- dark-factory runtime state (append to the importing repo's .gitignore) ---
+# Per-run artifacts: gate logs, generated serve env. Never tracked.
+.factory/runs/
+# The stop button exists only while stopping.
+.factory/STOP
+# Secret-bearing files must be ignored BEFORE the first committing workflow:
+# the §5a pre-flight runs `git check-ignore -v` over FACTORY_SECRET_FILES
+# (.env*, *secret*, *credential*, *.pem, service-account JSON) and REFUSES the
+# lap if any pattern is not ignored. Make sure your .gitignore covers them:
+.env*
+*.pem

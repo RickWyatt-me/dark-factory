@@ -1,0 +1,128 @@
+{
+  "_what_this_is": [
+    "THE STACK-SPECIFIC HALF OF THE VOX VALIDATION HARNESS, in one file.",
+    "ci.py is the step ladder: run each family in order, print a positive marker with",
+    "a count, name the family that stopped the run. The commands live here.",
+    "",
+    "count_pattern: a regex whose CAPTURED GROUPS are summed to produce the count.",
+    "Zero is not a pass — a suite that discovered nothing exits 0 and looks perfect."
+  ],
+
+  "base_ref": "develop",
+
+  "families": [
+    {
+      "name": "static",
+      "marker": "STATIC_OK",
+      "steps": [
+        { "name": "lint", "run": "npm run lint" },
+        { "name": "typecheck", "run": "npm run typecheck" }
+      ],
+      "quick": true,
+      "timeout_s": 600
+    },
+    {
+      "name": "unit",
+      "marker": "UNIT_PASSED",
+      "run": "npm test -- --ci",
+      "count_pattern": "Tests:\\s+(?:\\d+ skipped, )?(\\d+) passed",
+      "quick": true,
+      "timeout_s": 1200
+    },
+    {
+      "name": "ef_unit",
+      "marker": "EF_UNIT_PASSED",
+      "run": "npm run test:functions:unit",
+      "count_pattern": "(\\d+) passed",
+      "quick": false,
+      "timeout_s": 900
+    },
+    {
+      "name": "fidelity",
+      "marker": "FIDELITY_OK",
+      "run": "npm run eval:fidelity",
+      "count_pattern": "fixtures : (\\d+) positive, (\\d+) negative",
+      "quick": false,
+      "timeout_s": 120
+    },
+    {
+      "name": "migrations",
+      "marker": "MIGRATION",
+      "_note": "conformance lint (harness/migration_lint.py) + local `supabase db reset` replay when the range adds migrations; concludes MIGRATION_LINT_NONE or MIGRATION_REPLAY_OK",
+      "quick": false,
+      "timeout_s": 900
+    },
+    {
+      "name": "drizzle",
+      "marker": "DRIZZLE_LINT",
+      "_note": "client-migration conformance lint (harness/drizzle_lint.py): append-only, NNNN sequential, journal/migrations.js agreement; concludes DRIZZLE_LINT_NONE or DRIZZLE_LINT_OK (territory expansion 2026-08-18)",
+      "quick": false,
+      "timeout_s": 300
+    },
+    {
+      "name": "integration",
+      "marker": "INTEGRATION_PASSED",
+      "run": "npm run test:integration -- --ci",
+      "count_pattern": "Tests:\\s+(?:\\d+ skipped, )?(\\d+) passed",
+      "needs_stack_env": true,
+      "quick": false,
+      "timeout_s": 1200
+    },
+    {
+      "name": "deno_integration",
+      "marker": "DENO_INTEGRATION_PASSED",
+      "run": "npm run test:functions:integration",
+      "count_pattern": "ok \\| (\\d+) passed \\| 0 failed",
+      "_note": "the Deno live-stack suites, dark until 2026-08-18 (#15/#18/#22's recorded gap); owns its own functions-serve via VoxStack (MOCK_MODE=true, the suites' documented contract), RUN_INTEGRATION=true. pipeline-chain.test.ts is deliberately excluded: it requires hand-seeded TEST_RECORDING_ID/TEST_TENANT_ID fixtures and its chain coverage is superseded by the e2e family's live journey",
+      "quick": false,
+      "timeout_s": 900
+    },
+    {
+      "name": "native_compile",
+      "marker": "NATIVE_COMPILE",
+      "trigger_paths": ["modules/", "app.config.ts"],
+      "_note": "iOS simulator compile (no signing) only when the range touches the native surface (ios/ and android/ are gitignored prebuild artifacts); concludes NATIVE_COMPILE_NONE or NATIVE_COMPILE_OK (territory expansion 2026-08-18)",
+      "quick": false,
+      "prebuild_timeout_s": 1200,
+      "timeout_s": 2400
+    },
+    { "name": "e2e", "marker": "E2E", "quick": false },
+    { "name": "holdout", "marker": "HOLDOUT_PASSED", "quick": false },
+    {
+      "name": "compile_eval",
+      "marker": "COMPILE_EVAL_PASSED",
+      "steps": [
+        { "name": "lockstep", "run": "npm run eval:compile:lockstep" },
+        { "name": "gate", "run": "npm run eval:compile" }
+      ],
+      "result_json": "tests/compile-eval/results/gate-last-run.json",
+      "env_keys_from_dotenv_local": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+      "quick": false,
+      "timeout_s": 1800
+    }
+  ],
+
+  "app": {
+    "_note": [
+      "The 'app' is the LOCAL Supabase stack plus `supabase functions serve`.",
+      "Fixed ports (single instance per machine) — the dynamic-port rule of the",
+      "template does not apply; instead the driver FAILS if another serve owns the",
+      "functions gateway, so two runs cannot silently share one environment."
+    ],
+    "health_function": "fn-hello",
+    "boot_timeout_s": 90,
+    "stack_start_timeout_s": 300,
+    "serve_env_source": "supabase/functions/.env",
+    "serve_env_overlay_from_dotenv_local": [
+      "RESEND_API_KEY",
+      "OPENAI_API_KEY"
+    ],
+    "serve_env_force": {
+      "MOCK_MODE": "false",
+      "DOCRAPTOR_TEST_MODE": "true",
+      "EMBED_PROVIDER": "openai"
+    }
+  },
+
+  "e2e_timeout_s": 900
+}
