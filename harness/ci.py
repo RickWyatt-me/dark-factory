@@ -220,6 +220,40 @@ def run_counted(name: str, floor_key: str,
     return True
 
 
+def _stack_reset(cfg: dict, why: str) -> bool:
+    """`supabase db reset` — replays the branch's chain + seed.sql. Loud on purpose."""
+    print(f"STACK_RESET running `supabase db reset` - {why}", flush=True)
+    rc, out = run("supabase db reset", timeout=cfg.get("timeout_s", 900))
+    if rc != 0:
+        return not fail("migrations:replay", out)
+    print("STACK_RESET_OK the emulator now carries this branch's chain + seed.sql",
+          flush=True)
+    return True
+
+
+def _branch_vs_applied() -> tuple[set[str], set[str] | None]:
+    """The branch's migration versions vs the emulator's applied versions.
+
+    Cheap on purpose — a glob and one psql query — so it can run on every full
+    lap. An applied set of None means the ledger query itself failed; the
+    caller must treat that as contaminated, never as clean.
+    """
+    branch: set[str] = set()
+    for p in (ROOT / "supabase" / "migrations").glob("*.sql"):
+        m = re.match(r"(\d+)_", p.name)
+        if m:
+            branch.add(m.group(1))
+    sys.path.insert(0, str(HERE))
+    from appproc import stack_env                                  # noqa: E402
+    db_url = stack_env(int(CONFIG["app"].get("stack_start_timeout_s", 300)))["db_url"]
+    rc, out = run(f'psql "{db_url}" -Atc '
+                  f'"select version from supabase_migrations.schema_migrations"',
+                  timeout=60)
+    if rc != 0:
+        return branch, None
+    return branch, {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+
 def run_migrations() -> bool:
     """Conformance lint + local replay for migrations added since the base.
 
@@ -227,8 +261,12 @@ def run_migrations() -> bool:
     procedure — append-only, 00NNN sequential, header line, regenerated index.
     When the range adds migrations, the local emulator is rebuilt with
     `supabase db reset` so every stack-dependent family after this one runs
-    against the schema the PR actually ships. No database beyond the local
-    emulator is ever touched here; prod apply is permanently human
+    against the schema the PR actually ships. When it adds none, the SHARED
+    emulator (fixed ports, single instance — appproc.py) may still be carrying
+    another lap's replay, so the applied set is compared against the branch's
+    set and the stack is reset on mismatch (issue #61: PR #40's privileges red
+    inherited schema a different branch left behind). No database beyond the
+    local emulator is ever touched here; prod apply is permanently human
     (FACTORY_RULES §2.3).
     """
     cfg = fam_cfg("migrations")
@@ -238,7 +276,22 @@ def run_migrations() -> bool:
     if rc != 0:
         return not fail("migrations", out)
     if "MIGRATION_LINT_NONE" in out:
-        return True
+        branch, applied = _branch_vs_applied()
+        if applied == branch:
+            print(f"STACK_SET_MATCH versions={len(branch)} - the emulator's "
+                  f"applied chain is exactly this branch's chain", flush=True)
+            return True
+        if applied is None:
+            why = ("the emulator's migration ledger could not be read - "
+                   "treating the stack as contaminated")
+        else:
+            missing = sorted(branch - applied)
+            extra = sorted(applied - branch)
+            why = (f"STACK_CONTAMINATED branch={len(branch)} "
+                   f"applied={len(applied)} missing={missing[:5]} "
+                   f"extra={extra[:5]} - another lap's replay left a "
+                   f"different schema on the shared stack")
+        return _stack_reset(cfg, why)
     m = re.search(r"MIGRATION_LINT_OK files=(\d+)", out)
     if m is None:
         return not fail("migrations", out)

@@ -256,6 +256,20 @@ except Exception:
     print("no")
 PY
 )
+  # A replayed ruling announces itself (issue #63, Rick's directive 2026-08-20): loud
+  # in the log AND on the PR, whether the reuse clears the hold or repeats a flag. The
+  # annotation is written by run-workflow.sh only on an exact content-hash match with
+  # the persisted first parse; its absence means a fresh judge run.
+  AV_REUSED_FROM="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('reused_from_run',''))" "$AV" 2>/dev/null || true)"
+  if [ -n "$AV_REUSED_FROM" ]; then
+    echo "GATE_NOTE: the assumptions ruling is REUSED from run $AV_REUSED_FROM (exact content-hash match) - no fresh judge roll."
+    { echo "## Factory Gate: assumptions ruling reused"
+      echo ""
+      echo "The recorded assumptions are byte-identical to the set already parsed in run"
+      echo "\`$AV_REUSED_FROM\`; that ruling replays. A reuse repeats the first parsed"
+      echo "ruling - flagged replays as flagged - it never re-rolls it."
+    } | note || true
+  fi
   if [ "$AV_OK" = "yes" ]; then
     echo "GATE_NOTE: $A_BLOCKS recorded assumption(s) reviewed by the assumptions judge - all ruled benign; the assumptions hold is cleared, the ruling rides the run ($AV)."
   else
@@ -336,7 +350,14 @@ case "$DECISION" in
         fi
         echo ""
         echo "- e2e steps asserted: $STEPS (floor $FLOOR)"
-        echo "- deliberate defects caught: $MC/$MT"
+        # Mirrors the enforcement's own presence guard (section 2): MT/MC default to
+        # 0/-1 sentinels when the log carries no mutation markers, and PR #38's
+        # PASS-held comment printed the raw '-1/0' as if it meant something.
+        if grep -q "MUTATIONS_TOTAL" "$LOG"; then
+          echo "- deliberate defects caught: $MC/$MT"
+        else
+          echo "- deliberate defects caught: none injected (no mutation set ran for this validator)"
+        fi
         echo ""
         echo "This is not a failure and re-running will not change it. It clears when the"
         echo "lock files are calibrated against a build a human has actually used, which is"

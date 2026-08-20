@@ -28,7 +28,8 @@ Ground rules for this node's tools (Phase D lap 1, patch 3):
 
 ## Read
 
-- `git ls-files`, `git log -10 --oneline`, `git status`
+- `git ls-files`, `git log -10 --oneline`, `git show <sha>` / `git show <sha> --stat`,
+  `git status`
 - `MISSION.md`, `CLAUDE.md` (the architecture rules: naming, structure, patterns,
   queue states, migration procedure), `README.md` if present
 - `_bmad-output/project-context.md` — the standing pre-work read

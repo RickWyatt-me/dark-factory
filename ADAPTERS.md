@@ -79,8 +79,8 @@ its data file is an ADAPTER).
 - **`factory/db_apply_policy.py`** — env-parameterized
   (`FACTORY_DB_HOT_TABLES` / `_PROTECTED_SCHEMAS` / `_PROTECTED_TABLES` /
   `_FLOOR_SCHEMAS`); one in-code value: the allowed function-schema whitelist
-  (`vox`/`public`) around lines 279/332. Roles `authenticated`/`service_role`
-  are the Supabase role model.
+  (`vox`/`public` — grep for `("vox", "public")`; it appears at several
+  checks). Roles `authenticated`/`service_role` are the Supabase role model.
 - **`harness/harness.config.json`** — the intended per-project swap point for
   gate commands, count regexes, timeouts, app wiring. Every `npm run …`
   command, the health function name, and the dotenv key list are the source

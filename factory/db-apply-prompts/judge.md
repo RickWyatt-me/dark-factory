@@ -63,6 +63,13 @@ policy is present). These run against production immediately after the apply; an
 FALSE stops the line and pages the human. If you cannot express a meaningful check
 for a file, you cannot clear that file — `park` it.
 
+Scar (issue #65, 00170): `pg_get_function_identity_arguments` includes declared
+argument names (`'p_recording_id uuid'`, never `'uuid'`) — a hand-authored check
+against the bare type list false-halts a good apply. For function existence,
+SECURITY DEFINER, and return type, prefer the machinery's derivable probe (the
+policy engine derives one even for files it escalated to you); spend your
+verify_sql on what the probe cannot see.
+
 ## The verdict
 
 Write EXACTLY one JSON file at `{{VERDICT_PATH}}` (use the Write tool):

@@ -363,6 +363,109 @@ provision_worktree() {      # provision_worktree <path>
   return 0
 }
 
+# --- the migration-number race (issue #64) -----------------------------------
+#
+# Two laps in flight can both mint the same 00NNN: each computes "highest in the
+# folder + 1" from its own branch-time snapshot of the base. Observed 2026-08-19/20:
+# PR #43 merged 00169_weekly_report_tenancy_rekey while PR #38 sat parked carrying
+# 00169_reprocess_failed_pipeline_run, and #38's rebase then died on a MIGRATIONS.md
+# conflict this runner refused to resolve. A human renumbered #38's file to 00170 by
+# hand (branch commit 6d0f402). These two helpers make the validate node do exactly
+# that mechanical fix, and nothing beyond it.
+#
+# Renumber-on-rebase over a reservation counter, deliberately: migrations are minted
+# by HUMAN sessions at least as often as by laps, and a human following the skill
+# ("next = highest in folder + 1") would never consult a factory lock file — so a
+# counter only coordinates laps with each other and leaves the likelier collision
+# class unfixed, while also becoming a second source of truth beside the folder the
+# skill names as the only one. The collision is instead settled at the one point
+# where ordering becomes real (the pre-validation rebase), and BEFORE anything is
+# judged — everything downstream judges the renumbered tree, so nothing merges in a
+# form no judge saw. Any ambiguity escalates; the factory does not guess.
+
+# A rebase stopped ONLY on supabase/migrations/MIGRATIONS.md is not a content
+# conflict — the index is a generated file ("do not edit by hand"), so the resolution
+# is to regenerate it from the files actually in the tree and continue. Any other
+# unmerged path is a real conflict and stays a human problem: return 1 with the
+# rebase state intact so the caller's abort-and-escalate path reads it.
+settle_index_conflicts() {   # settle_index_conflicts <worktree>  -> 0 rebase completed
+  local wt="$1" gd tries=0 unmerged
+  gd="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  while [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ]; do
+    tries=$((tries+1)); [ "$tries" -gt 20 ] && return 1
+    unmerged="$(git -C "$wt" diff --name-only --diff-filter=U)"
+    [ "$unmerged" = "supabase/migrations/MIGRATIONS.md" ] || return 1
+    # Exit 1 here means duplicate numbers — expected mid-race; the file is still
+    # written and the post-rebase renumber below settles the duplicate itself.
+    ( cd "$wt" && node scripts/gen-migrations-index.mjs ) || true
+    # Never stage a file that still carries conflict markers: if the generator did
+    # not run (node missing, script absent on an old branch), adding the conflicted
+    # index would commit the markers as content.
+    grep -q '^<<<<<<<' "$wt/supabase/migrations/MIGRATIONS.md" && return 1
+    git -C "$wt" add supabase/migrations/MIGRATIONS.md || return 1
+    # --skip is the fallback for a commit the resolution emptied (a commit that only
+    # touched the index). GIT_EDITOR=true: no editor exists in a headless run.
+    GIT_EDITOR=true git -C "$wt" rebase --continue \
+      || GIT_EDITOR=true git -C "$wt" rebase --skip \
+      || true
+  done
+  return 0
+}
+
+# After a completed rebase, a migration the branch added whose 00NNN is already taken
+# on the base (under a DIFFERENT name — same name never conflicts, it deduplicates)
+# gets the next free number: git mv + the header line's number token + a regenerated
+# index, committed on the branch. That is byte-for-byte the human fix on PR #38, and
+# nothing else: content is untouched, and the guard/gate/judge all run after this.
+# Returns 1 — the caller escalates — when the duplicate cannot be settled without a
+# choice: the generator is red for a reason other than duplicates, a duplicate pair
+# is not exactly one base file + one branch file, or any mechanical step fails.
+renumber_duplicate_migrations() {   # renumber_duplicate_migrations <worktree>
+  local wt="$1" base_files dupes num keep branch_file f bn next newfile
+  ( cd "$wt" && node scripts/gen-migrations-index.mjs ) >/dev/null 2>&1 && return 0
+  base_files="$(git ls-tree -r --name-only "$BASE" -- supabase/migrations/ | sed 's|.*/||')"
+  dupes="$(ls "$wt/supabase/migrations" | grep -E '^[0-9]{5}_.*\.sql$' | cut -c1-5 | sort | uniq -d)"
+  [ -n "$dupes" ] || return 1
+  for num in $dupes; do
+    keep=0; branch_file=""
+    for f in "$wt"/supabase/migrations/"${num}"_*.sql; do
+      bn="$(basename "$f")"
+      if printf '%s\n' "$base_files" | grep -qxF "$bn"; then keep=$((keep+1)); else branch_file="$bn"; fi
+    done
+    [ -n "$branch_file" ] && [ "$keep" -eq 1 ] || return 1
+    next="$(ls "$wt/supabase/migrations" | grep -E '^[0-9]{5}_' | cut -c1-5 | sort -n | tail -1)"
+    next="$(printf '%05d' $((10#$next + 1)))"
+    newfile="${next}_$(printf '%s' "$branch_file" | cut -c7-)"
+    git -C "$wt" mv "supabase/migrations/$branch_file" "supabase/migrations/$newfile" || return 1
+    # Line 1 is the skill-mandated header; only its number token changes. python3, not
+    # sed -i (BSD/GNU -i disagree), and it refuses a line 1 that is not the header.
+    python3 - "$wt/supabase/migrations/$newfile" "$num" "$next" <<'PY' || return 1
+import io, sys
+p, old, new = sys.argv[1:4]
+lines = io.open(p, encoding='utf-8').read().split('\n')
+if not lines or not lines[0].startswith('-- %s ' % old):
+    raise SystemExit('line 1 is not the %s header' % old)
+lines[0] = '-- ' + new + lines[0][len('-- ' + old):]
+io.open(p, 'w', encoding='utf-8', newline='\n').write('\n'.join(lines))
+PY
+    echo "$branch_file -> $newfile" >> "$RUNDIR/RENUMBERED"
+    log "MIGRATION_RENUMBERED $branch_file -> $newfile — $num is already taken on $BASE under a different name (migration-number race, issue #64)"
+  done
+  # Must be green now — a still-red generator means the settle above was not enough.
+  ( cd "$wt" && node scripts/gen-migrations-index.mjs ) >/dev/null 2>&1 || return 1
+  git -C "$wt" add supabase/migrations/ || return 1
+  git -C "$wt" commit -q \
+    -m "chore(factory): renumber migration on rebase - number already taken on base (#$ISSUE_NUM)" \
+    -m "Mechanical rewrite by the validate node, BEFORE judging: $(paste -sd ', ' "$RUNDIR/RENUMBERED" 2>/dev/null || echo 'see RENUMBERED') — rename + header number + regenerated index only; migration content untouched. Everything downstream (guard, gate, judge) runs against this tree. Issue #64.
+
+Epic: factory
+Story: issue-$ISSUE_NUM
+Type: fix
+Learning: none recorded
+Affected: supabase/migrations" || return 1
+  return 0
+}
+
 # --- the per-target lock, for runs started BY HAND ---------------------------
 #
 # THE HOLE THIS CLOSES. The lock lived entirely in orchestrator.sh, so it protected two
@@ -442,8 +545,12 @@ case "$WORKFLOW" in
 
     (
       cd "$WT"
+      # `git show` added 2026-08-20 (issue #60, 5th denial sighting): prime kept
+      # reaching for read-only `git show` during its targeted read and burning
+      # retries on denials — same class d9eeca9 fixed for the judge and review
+      # nodes. `git fetch` stays out (mutates refs).
       node prime     "$MODEL_CHEAP"   "$ROOT/factory/prompts/prime.md" \
-           "Read,Glob,Grep,Bash(git log:*),Bash(git ls-files:*),Bash(git status)"
+           "Read,Glob,Grep,Bash(git log:*),Bash(git show:*),Bash(git ls-files:*),Bash(git status)"
       # NODE_OK only means the agent exited 0 — denials are non-fatal by design, so a
       # prime that was refused its Write still "succeeds" with no priming on disk (lap 2,
       # finding B: it happened twice and nothing said so). Loud, not fatal: the opus plan
@@ -679,11 +786,37 @@ Affected: ${AFFECTED_TOP:-unknown}"
       git worktree add "$RB_WT" "$BRANCH" >"$REBASE_LOG" 2>&1 \
         || { prepare_worktree_path "$RB_WT"
              escalate "could not check out $BRANCH into an isolated worktree for the pre-validation rebase (see $REBASE_LOG). This is a machinery failure, not a merge decision."; }
+      REBASE_OK=no
       if git -C "$RB_WT" rebase "$BASE" >>"$REBASE_LOG" 2>&1; then
+        REBASE_OK=yes
+      elif settle_index_conflicts "$RB_WT" >>"$REBASE_LOG" 2>&1; then
+        # The only unmerged path was the generated MIGRATIONS.md (issue #64's shape);
+        # regenerating it from the tree resolved every stop and the rebase completed.
+        REBASE_OK=yes
+        log "REBASE_INDEX_CONFLICT_SETTLED MIGRATIONS.md conflicts resolved by regeneration (generated file; migration-number race, issue #64)"
+      fi
+      if [ "$REBASE_OK" = yes ]; then
+        # Duplicate-number check runs on EVERY completed rebase, not only the settled
+        # ones — the collision is what makes the index conflict, but nothing
+        # guarantees the conflict is what surfaces it.
+        if ! renumber_duplicate_migrations "$RB_WT"; then
+          prepare_worktree_path "$RB_WT"
+          escalate "the branch adds a migration whose 00NNN number is already taken on $BASE and the mechanical renumber could not settle it without a choice (see $RUNDIR/RENUMBERED and $REBASE_LOG if present). A human must renumber per the vox-database-migrations skill; the factory will not guess. (issue #64)"
+        fi
         prepare_worktree_path "$RB_WT"
         log "REBASED $BRANCH onto $BASE in an isolated worktree; everything below judges the rebased tree"
         [ "$GH" -eq 1 ] && { git push -q --force-with-lease origin "$BRANCH" || log "REBASE_PUSH_FAILED (validating locally)"; }
         CHECKOUT="$BRANCH"
+        # LOUD in the audit trail (Factory Resume's condition on the issue-#64 design):
+        # a mechanically rewritten branch must say so where the judged diff is read —
+        # on the PR itself, plus the RENUMBERED marker in the run dir and the log
+        # lines above. Never fatal: the rewrite already happened and is recorded.
+        if [ -s "$RUNDIR/RENUMBERED" ]; then
+          { echo "**Migration renumbered during the pre-validation rebase** (migration-number race, issue #64). Mechanical only — rename + header number + regenerated index; migration content untouched. Everything below judged the renumbered tree."
+            echo
+            sed 's/^/- /' "$RUNDIR/RENUMBERED"; } | note "$TARGET" \
+            || log "RENUMBER_NOTE_FAILED — the renumber is still recorded in $RUNDIR/RENUMBERED and the log above"
+        fi
       else
         git -C "$RB_WT" rebase --abort >/dev/null 2>&1 || true
         prepare_worktree_path "$RB_WT"
@@ -798,8 +931,54 @@ Affected: ${AFFECTED_TOP:-unknown}"
     fi
     if [ -s "$ASSUMPTIONS_SRC" ]; then
       cp "$ASSUMPTIONS_SRC" "$RUNDIR/assumptions.txt"
-      ( cd "$WT" && node assumptions-judge "$MODEL_CHEAP" "$ROOT/factory/prompts/assumptions-judge.md" \
-          "Read,Write" ) || log "ASSUMPTIONS_JUDGE_FAILED - the hold falls back to a human (fail-closed)"
+      # A given assumptions CONTENT is judged once (issue #63, Rick's directive
+      # 2026-08-20): PR #38's revalidation re-rolled a fresh judge on a byte-identical
+      # file and got a different ruling AND a different block segmentation (9/9
+      # all_benign became 7-reviewed needs_human). An exact-hash match replays the
+      # first PARSED ruling verbatim -- flagged replays as flagged, so reuse can only
+      # ever repeat a ruling, never soften one; acceptance still travels through
+      # labels. Any content change misses the hash and re-judges in full.
+      A_SHA="$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$ASSUMPTIONS_SRC")"
+      A_STORE="${ASSUMPTIONS_SRC%.txt}.verdict.json"
+      A_REUSED=no
+      if [ -s "$A_STORE" ]; then
+        A_REUSED="$(python3 - "$A_STORE" "$A_SHA" "$RUNDIR/assumptions-verdict.json" <<'PY'
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+    if s.get("sha256") == sys.argv[2] and isinstance(s.get("ruling"), dict) and "verdict" in s["ruling"]:
+        r = dict(s["ruling"])
+        r["reused_from_run"] = s.get("run", "?")
+        r["reused_sha256"] = s["sha256"]
+        json.dump(r, open(sys.argv[3], "w"), indent=2)
+        print("yes")
+    else:
+        print("no")
+except Exception:
+    print("no")
+PY
+)"
+      fi
+      if [ "$A_REUSED" = "yes" ]; then
+        log "ASSUMPTIONS_RULING_REUSED sha256=$A_SHA from=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('run','?'))" "$A_STORE") - byte-identical content, the first parsed ruling replays (flagged stays flagged)"
+      else
+        ( cd "$WT" && node assumptions-judge "$MODEL_CHEAP" "$ROOT/factory/prompts/assumptions-judge.md" \
+            "Read,Write" ) || log "ASSUMPTIONS_JUDGE_FAILED - the hold falls back to a human (fail-closed)"
+        # Persist ONLY a ruling that parses with a verdict field, keyed to the exact
+        # bytes it judged, carrying the run id (audit trail) and the blank-line block
+        # count gate.sh's truncation check reads. An unparseable verdict is never
+        # persisted -- the next run re-judges (fail-closed).
+        if [ -s "$RUNDIR/assumptions-verdict.json" ]; then
+          A_BLOCKS_NOW="$(awk 'BEGIN{RS=""} {n++} END{print n+0}' "$RUNDIR/assumptions.txt")"
+          python3 - "$RUNDIR/assumptions-verdict.json" "$A_STORE" "$A_SHA" "$RUN" "$A_BLOCKS_NOW" <<'PY' || log "ASSUMPTIONS_RULING_NOT_PERSISTED - verdict did not parse; the next run re-judges (fail-closed)"
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert "verdict" in r
+json.dump({"sha256": sys.argv[3], "run": sys.argv[4], "blocks": int(sys.argv[5]), "ruling": r},
+          open(sys.argv[2], "w"), indent=2)
+PY
+        fi
+      fi
       [ -s "$RUNDIR/assumptions-verdict.json" ] \
         || log "ASSUMPTIONS_JUDGE_NO_VERDICT - gate.sh holds for a human (fail-closed)"
     fi

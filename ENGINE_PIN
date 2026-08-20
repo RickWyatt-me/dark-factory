@@ -1,6 +1,6 @@
 source_repo: vox
-commit: 6d9f058b2573eeec9a17827fb058206cc2e057de
-synced_at: 2026-08-20T15:55:05Z
+commit: 5f0363aa52c7a8f940c6143356028ff63b1aa550
+synced_at: 2026-08-20T17:19:42Z
 template_source MISSION.md 3469e8ffd8a158e03600bc7c49dd7aa887186b7a
 template_source FACTORY_RULES.md 027d153ad7a2bd0a4ea860e243937a026ce19d87
 template_source FACTORY.md 588cbb1259cd43e47c4ca29ad442976fcc244ae4

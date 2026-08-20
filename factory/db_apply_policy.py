@@ -208,6 +208,126 @@ def mentions_protected(stmt: str) -> tuple[str, bool] | None:
     return None
 
 
+# ---- function-probe derivation (issue #65) -----------------------------------
+# 00170's false DEPLOY_HALTED: a SECURITY DEFINER CREATE FUNCTION is denied above
+# the probe-deriving branch, so the file carried zero derivable probes and the
+# migration judge was forced to hand-author verify_sql — and wrote a probe
+# comparing pg_get_function_identity_arguments to the bare type list ('uuid'),
+# which Postgres never returns (it includes declared argument names:
+# 'p_recording_id uuid'). The apply was good; the probe was wrong. So: derive a
+# probe from the CREATE statement's OWN signature, resolved through
+# to_regprocedure so Postgres canonicalizes the type spellings — never a
+# hand-built identity string. When the signature does not parse cleanly, fall
+# back to the proname-existence probe: weaker, never wrong. A wrong strong probe
+# would recreate the exact false-halt this exists to remove.
+
+# Multi-word type names start with one of these; an argument whose first token
+# matches carries no name (e.g. `timestamp with time zone`), so the name/type
+# split must not eat the first word as a name.
+_TYPE_FIRST_WORDS = {"timestamp", "time", "character", "double", "bit",
+                     "national", "interval"}
+
+# Words that end a `RETURNS <type>` clause in the function options that follow it.
+_FN_OPTION_WORDS = ("LANGUAGE|AS|SECURITY|SET|IMMUTABLE|STABLE|VOLATILE|CALLED|"
+                    "STRICT|PARALLEL|COST|ROWS|WINDOW|LEAKPROOF|NOT|RETURNS|"
+                    "TRANSFORM|SUPPORT|EXTERNAL")
+
+
+def _split_args(argtext: str) -> list[str] | None:
+    """Split an argument list on top-level commas ('a numeric(10,2), b int' is
+    two items, not three). None when parens never balance."""
+    items, buf, depth = [], [], 0
+    for c in argtext:
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+        if c == "," and depth == 0:
+            items.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(c)
+    if depth != 0:
+        return None
+    last = "".join(buf).strip()
+    if last:
+        items.append(last)
+    return items
+
+
+def _arg_type(item: str) -> str | None:
+    """'p_recording_id UUID' -> 'uuid'; 'uuid' -> 'uuid'; 'a numeric(10,2)' ->
+    'numeric(10,2)'. None when unsure — OUT/INOUT/VARIADIC args (proargtypes
+    holds inputs only), quoted identifiers, anything that does not read as
+    [name] type [DEFAULT ...]."""
+    it = re.sub(r"\s+", " ", item).strip()
+    if not it or "'" in it or '"' in it:
+        return None
+    if re.match(r"(OUT|INOUT|VARIADIC)\b", it, re.I):
+        return None
+    it = re.sub(r"^IN\s+", "", it, flags=re.I)
+    it = re.split(r"\s+DEFAULT\s+|\s*=", it, maxsplit=1, flags=re.I)[0].strip()
+    toks = it.split(" ")
+    if len(toks) > 1 and toks[0].lower() not in _TYPE_FIRST_WORDS:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", toks[0]):
+            return None
+        it = " ".join(toks[1:])
+    typ = it.lower()
+    if not re.match(r"^[a-z_][a-z0-9_. ]*(\(\s*\d+(\s*,\s*\d+)?\s*\))?(\[\])*$", typ):
+        return None
+    return typ
+
+
+def _fn_probe_sql(head: str, schema: str, fn: str, secdef: bool) -> str | None:
+    """The strong probe: resolve the CREATE statement's own signature via
+    to_regprocedure (Postgres canonicalizes the type names — the apply having
+    succeeded guarantees they resolve), then assert prosecdef and, when a simple
+    RETURNS <type> is present, prorettype. None when the signature does not
+    parse cleanly — the caller falls back to the existence probe."""
+    i = head.find("(")
+    if i == -1:
+        return None
+    depth, j = 0, i
+    for j in range(i, len(head)):
+        if head[j] == "(":
+            depth += 1
+        elif head[j] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+    if depth != 0:
+        return None
+    items = _split_args(head[i + 1:j])
+    if items is None:
+        return None
+    types = []
+    for item in items:
+        t = _arg_type(item)
+        if t is None:
+            return None
+        types.append(t)
+    sig = f"{schema}.{fn}({', '.join(types)})"
+    rm = re.match(rf"\s*RETURNS\s+(TABLE\s*\(|SETOF\s+)?"
+                  rf"([A-Za-z_][A-Za-z0-9_. ]*?(?:\[\])*)\s+(?:{_FN_OPTION_WORDS})\b",
+                  head[j + 1:], re.I)
+    ret = rm.group(2).strip().lower() if rm and not rm.group(1) else None
+    conds = [f"p.prosecdef = {'true' if secdef else 'false'}"]
+    if ret:
+        conds.append(f"p.prorettype = '{ret}'::regtype")
+    return ("select coalesce((select " + " and ".join(conds) +
+            f" from pg_proc p where p.oid = to_regprocedure('{sig}')), false) as ok")
+
+
+def _fn_probe(head: str, schema: str | None, fn: str, secdef: bool) -> dict:
+    strong = _fn_probe_sql(head, schema or "public", fn, secdef)
+    weak = ("select count(*)>=1 as ok from pg_proc p join pg_namespace n on n.oid=p.pronamespace "
+            f"where p.proname='{fn}'" + (f" and n.nspname='{schema}'" if schema else ""))
+    return {"kind": "function", "name": (f"{schema}.{fn}" if schema else fn),
+            "sql": strong or weak, "md5_watch": {"schema": schema or "", "fn": fn}}
+
+
 # ---- classification ----------------------------------------------------------
 
 def classify_file(sql: str) -> tuple[list[dict], list[dict]]:
@@ -261,6 +381,16 @@ def classify_file(sql: str) -> tuple[list[dict], list[dict]]:
             deny("protection_disable", "disables a protection mechanism")
             continue
         if re.search(r"\bSECURITY\s+DEFINER\b", upb):
+            # Denied, but still derive the verification probe (issue #65): probes
+            # run AFTER the migration judge clears the file, and a file with zero
+            # derivable probes forces the judge to hand-author verify_sql — the
+            # 00170 false-halt. Deriving here cannot flip the verdict: file_allows
+            # still requires every statement to allow.
+            fm = re.match(rf"CREATE (?:OR REPLACE )?FUNCTION ({IDENT}(?:\s*\.\s*{IDENT})?)\s*\(", head, re.I)
+            if fm:
+                fschema, ffn = parse_rel(fm.group(1))
+                if fschema in (None, "vox", "public"):
+                    probes.append(_fn_probe(head, fschema, ffn, secdef=True))
             deny("privilege", "SECURITY DEFINER — privilege-bearing code")
             continue
         if re.match(r"(DO|CALL)\b", upb):
@@ -332,10 +462,7 @@ def classify_file(sql: str) -> tuple[list[dict], list[dict]]:
             if schema not in (None, "vox", "public"):
                 deny("protected_table", f"function in schema {schema}")
                 continue
-            q = ("select count(*)>=1 as ok from pg_proc p join pg_namespace n on n.oid=p.pronamespace "
-                 f"where p.proname='{fn}'" + (f" and n.nspname='{schema}'" if schema else ""))
-            probes.append({"kind": "function", "name": (f"{schema}.{fn}" if schema else fn),
-                           "sql": q, "md5_watch": {"schema": schema or "", "fn": fn}})
+            probes.append(_fn_probe(head, schema, fn, secdef=False))
             allow("create_function")
             continue
 
@@ -544,6 +671,59 @@ def selftest() -> int:
     stmts = split_statements("select '$a$; not a tag'; select $body$ x; y $body$;")
     assert len(stmts) == 2, f"splitter: got {len(stmts)}"
     n += 1
+
+    # --- issue #65 regressions: function-probe derivation ---------------------
+    def probe_case(sql: str, contains: list[str], absent: list[str], what: str) -> None:
+        nonlocal n
+        n += 1
+        _, p = classify_file(sql)
+        fns = [x for x in p if x["kind"] == "function"]
+        if not fns:
+            print(f"DB_POLICY_SELFTEST_FAIL {what} (no function probe derived)")
+            raise SystemExit(1)
+        s = fns[0]["sql"]
+        for frag in contains:
+            if frag not in s:
+                print(f"DB_POLICY_SELFTEST_FAIL {what} (probe missing {frag!r}) :: {s}")
+                raise SystemExit(1)
+        for frag in absent:
+            if frag in s:
+                print(f"DB_POLICY_SELFTEST_FAIL {what} (probe must not contain {frag!r}) :: {s}")
+                raise SystemExit(1)
+
+    # 00170's exact shape: named arg, SECURITY DEFINER, RETURNS UUID. The file
+    # still escalates (privilege class), but now carries a derivable probe that
+    # resolves the real signature — never a hand-built identity string.
+    sql_00170 = ("CREATE OR REPLACE FUNCTION vox.reprocess_recording(p_recording_id UUID)\n"
+                 "RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER\n"
+                 "SET search_path = vox, public, pg_temp\n"
+                 "AS $$ BEGIN RETURN p_recording_id; END $$;")
+    case(sql_00170, False, "secdef function still escalates with a probe derived")
+    probe_case(sql_00170,
+               ["to_regprocedure('vox.reprocess_recording(uuid)')",
+                "p.prosecdef = true", "p.prorettype = 'uuid'::regtype"],
+               ["pg_get_function_identity_arguments"],
+               "00170 regression: named-arg secdef derives signature probe")
+    probe_case("CREATE OR REPLACE FUNCTION vox.g(p_id uuid, p_note text DEFAULT null) "
+               "RETURNS integer LANGUAGE sql AS $$ select 1; $$;",
+               ["to_regprocedure('vox.g(uuid, text)')",
+                "p.prosecdef = false", "p.prorettype = 'integer'::regtype"],
+               ["pg_get_function_identity_arguments"],
+               "named args + DEFAULT derive bare-type signature")
+    probe_case("CREATE OR REPLACE FUNCTION vox.f() RETURNS int LANGUAGE sql AS $$ select 1; $$;",
+               ["to_regprocedure('vox.f()')"], [],
+               "zero-arg function derives signature probe")
+    probe_case("CREATE FUNCTION vox.h(ts timestamp with time zone, a numeric(10,2)) "
+               "RETURNS int LANGUAGE sql AS $$ select 1; $$;",
+               ["to_regprocedure('vox.h(timestamp with time zone, numeric(10,2))')"], [],
+               "multi-word and precision types survive the split")
+    probe_case("CREATE FUNCTION vox.j(OUT x int) RETURNS int LANGUAGE sql AS $$ select 1; $$;",
+               ["count(*)>=1", "proname='j'"], ["to_regprocedure"],
+               "unparseable signature (OUT arg) falls back to existence probe")
+    probe_case("CREATE FUNCTION vox.s(p_ids uuid[]) RETURNS SETOF uuid LANGUAGE sql "
+               "AS $$ select 1; $$;",
+               ["to_regprocedure('vox.s(uuid[])')"], ["prorettype"],
+               "SETOF return skips the rettype assertion")
 
     print(f"DB_POLICY_SELFTEST_OK n={n}")
     return 0
