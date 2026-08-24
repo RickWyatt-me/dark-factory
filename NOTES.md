@@ -53,3 +53,26 @@ One lesson per note. Only things git history can't show.
   "import" is a plain byte-identical copy of two directories, and `diff -r`
   against any pin is a one-liner. Don't reorganize them into `engine/` — it
   would break the cheap-resync and the byte-identity check for zero benefit.
+
+- **The first pin shipped the bug its own engine had just fixed upstream.**
+  Pin 5f0363a was the exact commit that introduced the renumber-on-rebase
+  path; the hot-fix (source e8f09a0) landed 52 minutes later and never rode a
+  re-sync. In an importing repo the misfire was worse than at the source:
+  `scripts/gen-migrations-index.mjs` is a documented dangling reference here,
+  so every rebased PR would have escalated as a phantom "duplicate migration."
+  CLOSED by the bd14e4f pin bump, which also brings
+  `factory/tests/migration-race-selftest.sh` (verified passing against this
+  repo's scrubbed copy). Lesson: the export is a snapshot — when the source
+  hot-fixes the engine, bump the pin the same day, because a snapshot of a
+  bug ships the bug.
+
+- **Back up `scripts/scrub.local.tsv` — it is the public boundary's single
+  point of failure.** The table is git-ignored and machine-local by design,
+  which also means no clone of this repo can restore it. Losing it doesn't
+  leak anything (the sync fails closed without it), but every rebuild-from-
+  memory risks a missed identifier on the next sync. Procedure: keep one copy
+  outside any git repo (password-manager secure note or an encrypted, non-
+  synced folder — never a cloud-synced plaintext file, and never any path a
+  repo could sweep up), and refresh that copy in the same sitting as any edit
+  to the table. `scripts/scrub.example.tsv` documents the format only — real
+  values live in exactly two places: the live file and its backup.

@@ -55,7 +55,10 @@ if [[ ! -f "$SCRUB_FILE" ]]; then
   exit 1
 fi
 FORBIDDEN=""
-while IFS=$'\t' read -r kind a b; do
+# `|| [[ -n $kind ]]`: a final line without a trailing newline still parses —
+# read exits non-zero there, and a silently dropped last record would either
+# skip a scrub substitution or lose a forbidden pattern. Both fail open.
+while IFS=$'\t' read -r kind a b || [[ -n "$kind" ]]; do
   [[ -z "$kind" || "$kind" == \#* ]] && continue
   case "$kind" in
     S)
