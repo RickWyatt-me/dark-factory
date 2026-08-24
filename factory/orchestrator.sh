@@ -60,16 +60,44 @@ log() { echo "[$(date -u +%FT%TZ)] $*"; }
 # dispatching is the one failure nothing else in this system can report.
 on_dispatcher_fault() {   # on_dispatcher_fault <rc> <line> <command>
   trap - ERR
-  log "DISPATCHER_FAULT line $2 exited $1: $3"
+  # The COMMAND is the trustworthy half of this report. For a failure inside a loop or
+  # function, bash's ERR-trap $LINENO names the enclosing block, not the failing line --
+  # both 2026-08 pages said "line 504", the loop's closing `done`, for a command that
+  # lives 170 lines up. So the command leads and the line number is demoted to a hint.
+  log "DISPATCHER_FAULT exited $1 running: $3 (bash reports line $2 - inside a loop that is the block, not the command; trust the command text)"
   log "  The tick ended here. Anything after this line did not run - locks were not"
   log "  reaped, stalls were not swept, and nothing further was dispatched."
   mkdir -p "$(dirname "$FACTORY_STOP_FILE")" 2>/dev/null || true
-  echo "- $(date -u +%FT%TZ)  (orchestrator)  dispatcher fault at line $2: $3" \
+  echo "- $(date -u +%FT%TZ)  (orchestrator)  dispatcher fault running: $3 (exit $1, near line $2)" \
     >> .factory/needs-human.md 2>/dev/null || true
-  log "$(factory_notify "orchestrator" "the dispatcher itself failed at line $2 running: $3")" || true
+  log "$(factory_notify "orchestrator" "the dispatcher itself failed running: $3 (exit $1, near line $2)")" || true
   exit 1
 }
 trap 'on_dispatcher_fault "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
+# A backend READ failure is not a machinery fault, and paging a human for one costs
+# exactly as much trust as a missed real page. Twice in 2026-08 a transient GitHub
+# failure (an EOF, a connection reset) on the queue read ended the tick through the
+# fault trap above -- "orchestrator needs a human" -- and the very next tick recovered
+# on its own. The doctrine stays fail-closed: a tick that cannot read state dispatches
+# NOTHING. What changes is the response class: unreachable is logged and waited out,
+# and only a PERSISTENT outage (3 consecutive unreachable ticks, ~90min at the cron
+# cadence) pages -- because a factory that is down for the day should still say so.
+BACKEND_UNREACH_FILE="$LOCKDIR/backend-unreachable.count"
+backend_unreachable() {   # backend_unreachable <which-read-failed>
+  mkdir -p "$LOCKDIR"
+  local n
+  n="$(cat "$BACKEND_UNREACH_FILE" 2>/dev/null || true)"
+  n=$(( ${n:-0} + 1 ))
+  echo "$n" > "$BACKEND_UNREACH_FILE"
+  log "BACKEND_UNREACHABLE ($n consecutive): $1 - failing closed, nothing dispatched; the next tick retries"
+  if [ "$n" -eq 3 ]; then
+    echo "- $(date -u +%FT%TZ)  (orchestrator)  GitHub unreachable for $n consecutive ticks ($1)" \
+      >> .factory/needs-human.md 2>/dev/null || true
+    log "$(factory_notify "orchestrator" "GitHub has been unreachable for $n consecutive ticks - the factory is failing closed and dispatching nothing until the queue can be read again")" || true
+  fi
+  exit 0
+}
 
 # =============================================================================
 # 1. THE STOP BUTTON. Checked first, every time, before anything else is read.
@@ -89,10 +117,17 @@ fi
 # stop button built that way works only while the network does. This one is a label you
 # ADD, and it FAILS CLOSED: if the stop state cannot be read, nothing dispatches. An
 # unreadable stop button is a stop button you do not have.
-STOP_OUT="$(python3 factory/state.py stop-requested 2>&1)" || {
+# Exit 4 is state.py's "GitHub unreachable" (GhError). It fails just as closed as a
+# real stop -- nothing below runs -- but it is counted, so a dead network eventually
+# pages instead of reading as a quietly stopped factory forever.
+STOP_RC=0
+STOP_OUT="$(python3 factory/state.py stop-requested 2>&1)" || STOP_RC=$?
+if [ "$STOP_RC" -eq 4 ]; then
+  backend_unreachable "the stop label could not be read ($STOP_OUT)"
+elif [ "$STOP_RC" -ne 0 ]; then
   log "STOPPED: $STOP_OUT"
   exit 0
-}
+fi
 log "$STOP_OUT"
 
 # =============================================================================
@@ -301,6 +336,16 @@ dispatch() {            # dispatch <workflow> <target-file>
            " state and WILL be dispatched again. See the log above for the last line it reached." ;;
     esac ) \
     >> "factory-$key.log" 2>&1 &
+  # THE LOCK MUST NAME THE PROCESS WHOSE DEATH MEANS THE LAP IS DEAD (issue #78,
+  # 2026-08-24). The atomic create above wrote `$$` -- the DISPATCHER's pid, which exits
+  # seconds after this function returns -- so to the pid reaper every lap looked dead by
+  # its second tick: locks reaped under live runs, capacity oversubscribed, and the
+  # stall sweep parking a validation that was mid-verdict (PR #77). `$!` is the subshell
+  # that runs the whole lap and whose EXIT trap releases the lock -- the pid the reaper
+  # was designed to test. Rewritten after the fork because `$$` inside the subshell would
+  # still name the parent; the `-e` guard keeps a lap that somehow already finished from
+  # having its released lock resurrected.
+  [ -e "$lock" ] && echo "$! $(date -u +%FT%TZ)" > "$lock" 2>/dev/null || true
 }
 
 # =============================================================================
@@ -325,11 +370,23 @@ SLOTS=$((MAX_PARALLEL - IN_FLIGHT))
 
 while [ "$SLOTS" -gt 0 ]; do
   SLOTS=$((SLOTS - 1))
+  # `|| NEXT_RC=$?` keeps errexit and the ERR trap out of this one read so its failures
+  # get CLASSIFIED instead of paged: exit 4 (GitHub unreachable) waits for the next
+  # tick, anything else nonzero is the dispatcher genuinely broken and pages as ever.
+  # This is exactly the read whose transient failures produced both 2026-08 false pages.
+  NEXT_RC=0
   if [ -n "$EXCLUDE" ]; then
-    NEXT="$(python3 factory/state.py next --exclude "$EXCLUDE")"
+    NEXT="$(python3 factory/state.py next --exclude "$EXCLUDE")" || NEXT_RC=$?
   else
-    NEXT="$(python3 factory/state.py next)"
+    NEXT="$(python3 factory/state.py next)" || NEXT_RC=$?
   fi
+  if [ "$NEXT_RC" -eq 4 ]; then
+    backend_unreachable "the work queue could not be read"
+  elif [ "$NEXT_RC" -ne 0 ]; then
+    on_dispatcher_fault "$NEXT_RC" "$LINENO" 'NEXT="$(python3 factory/state.py next)"'
+  fi
+  # The queue was readable, so this tick is not part of any outage streak.
+  rm -f "$BACKEND_UNREACH_FILE"
   ACTION="$(echo "$NEXT" | cut -f1)"
   TARGET="$(echo "$NEXT" | cut -f2)"
 

@@ -62,6 +62,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -121,7 +122,19 @@ def gh(*args: str) -> str:
 
 
 def gh_json(*args: str):
-    return json.loads(gh(*args) or "null")
+    """One bounded retry, here and only here. Every gh_json call site is a read (view,
+    list, GET); writes call gh() directly and are never retried, because a write that
+    timed out may still have landed and a blind retry double-posts. Both dispatcher
+    pages so far (2026-08-22, 2026-08-24) were single transient network failures on
+    this exact path -- "unexpected EOF" and "connection reset by peer" on the pr-list
+    read -- and each recovered by the next tick. One retry absorbs that class without
+    touching the loud-failure doctrine: a second consecutive failure still raises.
+    """
+    try:
+        return json.loads(gh(*args) or "null")
+    except GhError:
+        time.sleep(3)
+        return json.loads(gh(*args) or "null")
 
 
 def repo() -> str:
@@ -455,12 +468,15 @@ def stop_requested() -> tuple[bool, str]:
     -- it has one that works only while the network does. §11 said "remove a label",
     which is the wrong polarity: removing a label cannot be distinguished from an API
     call that failed to list it.
+
+    The GhError PROPAGATES (2026-08-24; it used to be answered as "stopped" here).
+    Reporting an outage as a stop sent a human hunting for a stop label that does not
+    exist. The caller chain keeps it exactly as closed: state.py turns the error into
+    exit 4, and the orchestrator dispatches nothing on exit 4 -- it just counts the
+    tick as unreachable instead of stopped, which is what it actually was.
     """
-    try:
-        hits = gh_json("issue", "list", "--label", STOP_LABEL, "--state", "open",
-                       "--json", "number,title")
-    except GhError as e:
-        return True, f"cannot read the stop state from GitHub, halting: {e}"
+    hits = gh_json("issue", "list", "--label", STOP_LABEL, "--state", "open",
+                   "--json", "number,title")
     if hits:
         h = hits[0]
         return True, f"#{h['number']} {h['title']} carries {STOP_LABEL}"
