@@ -1,15 +1,77 @@
 # dark-factory
 
-A standalone export of a working **dark factory**: an unsupervised build loop
-where work enters as GitHub issues and validated code merges and deploys with
-nobody at the keyboard — gated by a marker-verified validation ladder, a
-protected-files guard, independent judge agents, a graduated autonomy dial,
-and a stop button that fails closed.
+A GitHub issue goes in; validated, merged, deployed code comes out — with
+nobody at the keyboard. This repo is a standalone export of a **working dark
+factory**: the unsupervised build loop that runs a real production app today,
+packaged as engine + templates + binding procedure. It builds nothing by
+itself — a factory only exists once this engine is bound to a project: its
+own MISSION, its own gates, its own protected list, its own human.
 
-This repo is the **engine + templates + binding procedure**. It builds
-nothing by itself: a factory only exists once this engine is bound to a
-project — its own MISSION, its own gates, its own protected list, its own
-human.
+What keeps it honest is five restraints, all of which fail closed:
+
+- a **marker-verified validation ladder** — checks prove they ran by emitting
+  counted markers, so a silently skipped check reads as a failure;
+- a **protected-files guard** — no agent may edit the rules it is judged by,
+  the governance files, or the engine itself;
+- **independent judge agents** that see the diff and the contract, never the
+  builder's notes — they can add reasons to block, never remove one;
+- a **graduated autonomy dial** — every notch from "human signs everything"
+  to "hands off" is a separate, explicit human decision;
+- a **stop button** (`.factory/STOP` + a repo label) checked before any gate
+  can go green.
+
+## Get it
+
+```bash
+git clone https://github.com/RickWyatt-me/dark-factory.git
+```
+
+Install the import skill for [Claude Code](https://claude.com/claude-code)
+(it walks the binding procedure with its refusal gates enforced):
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$(pwd)/dark-factory/skills/dark-factory-import" ~/.claude/skills/dark-factory-import
+```
+
+Then, from **your project's repo** (not this one), start Session 0:
+
+```bash
+cd /path/to/your-project
+claude
+# then say: import the dark factory from /path/to/dark-factory
+```
+
+## What happens on your first import
+
+Session 0 follows `INSTALL.md`'s phases, and it starts by trying to refuse
+you. That is by design.
+
+1. **Prerequisites & refusals.** You need a PRD with non-goals (no PRD → no
+   out-of-scope list → triage can't reject → scope rot with nobody watching),
+   observable software, a real test command that fails when the product is
+   broken, a human owner, `gh` auth, and a machine that stays on. Missing any
+   one, the skill stops.
+2. **Engine copy.** `factory/` + `harness/` land in your repo byte-identical
+   to this one — verified with `diff -r`, versioned by `ENGINE_PIN`.
+3. **Governance fill-in.** You fill `templates/` into your own `MISSION.md`,
+   `FACTORY_RULES.md`, `FACTORY.md`, and `CLAUDE.md` block. Every filled file
+   is a human commit and goes straight onto the protected list.
+4. **Binding.** `factory/config.sh` is authored fresh for your project;
+   `guard.py`'s protected list is rewritten; the validation families, E2E
+   journeys, holdout scenarios, floor counts, and mutation defects become
+   yours (the shipped ones are worked examples from the source product —
+   proving the gate against someone else's bugs proves nothing).
+5. **Prove it can fail.** Labels, machinery self-checks, `harness/ci.py
+   --prove`, the notify channel, and the stop button — each tested on
+   purpose before anything is armed.
+6. **Dial up slowly.** The factory starts at **dial 0**: it builds, a human
+   signs `factory:accepted`, a human merges. One notch per watched cycle,
+   each notch an explicit human go. The scheduled trigger is installed last.
+
+The conservative defaults are the point: dial 0, human signature required,
+no production-DB road, evolution auto-apply OFF, no artifact-build road. Each
+is enabled later by its own human commit, one at a time — or never.
 
 ## Layout
 
@@ -20,31 +82,20 @@ human.
 | `templates/` | Governance templates: `MISSION.template.md`, `FACTORY_RULES.template.md`, `FACTORY.template.md`, `CLAUDE.template.md`, plus `gitignore.snippet`. Filled per project, by a human, as human commits. |
 | `.factory/` | Runtime-state scaffolding, shipped empty on purpose. |
 | `docs/factory/` | Template stubs for the operationally load-bearing docs. |
-| `INSTALL.md` | The binding procedure — how a project imports and arms this. |
-| `ADAPTERS.md` | The honest map: what's generic, what's config, what's shaped around the source stack (Supabase/Expo) and what swapping it takes. |
-| `skills/dark-factory-import/` | The import skill (interactive, refusal-gated) — the procedure INSTALL.md documents, enforced. |
+| `INSTALL.md` | The binding procedure — every fact the import skill enforces. |
+| `ADAPTERS.md` | The honest map: what's generic, what's config, what's shaped around the source stack (Supabase/Expo), what swapping it takes, and every known dangling reference. |
+| `skills/dark-factory-import/` | The Session-0 import skill (interactive, refusal-gated). |
 | `scripts/sync-from-source.sh` | Re-extracts the engine from a new pinned commit of the source repo in one command. |
 | `ENGINE_PIN` | The commit this engine was extracted from, plus hashes of the governance files the templates were derived from. |
 | `NOTES.md` | Working lessons from the export itself. |
 
-## The short version of importing
+## Reading order
 
-Read `INSTALL.md` (or run the `dark-factory-import` skill). The shape:
-
-1. **Prerequisites & refusals** — PRD, observable software, a test command,
-   a human owner, `gh` auth, a machine that stays on. No PRD → no factory.
-2. **Copy the engine** — `factory/` + `harness/` plumbing, byte-identical.
-3. **Fill the governance templates** — human commits; the filled files go
-   straight onto the protected list.
-4. **Bind** — author `factory/config.sh` fresh; rewrite `guard.py`'s
-   protected list; supply your own gates, E2E, holdout, floor, defects.
-5. **Prove** — labels, machinery self-checks, `harness/ci.py --prove`,
-   notify + stop button tested on purpose.
-6. **Dial up slowly** — dial 0, one lap by hand; one notch per watched
-   cycle, each notch an explicit human go. Trigger install comes last.
-
-Conservative defaults everywhere: dial 0, a human signs `factory:accepted`,
-no prod-DB road, evolution auto-apply OFF, no artifact-build road.
+`INSTALL.md` for the binding facts. `ADAPTERS.md` before you touch anything —
+it is the honesty map of what is generic and what is shaped like the source
+project. `templates/` to see what you'll be asked to write. The engine's own
+comments carry the design history: most non-obvious lines say which real
+failure taught them.
 
 ## What this repo is not
 
