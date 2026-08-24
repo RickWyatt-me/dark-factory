@@ -20,6 +20,50 @@ What keeps it honest is five restraints, all of which fail closed:
 - a **stop button** (`.factory/STOP` + a repo label) checked before any gate
   can go green.
 
+## Lineage
+
+This factory did not start from zero. The foundation — a label-driven state
+machine living entirely on GitHub issues, a dumb dispatcher on a timer that
+never asks a model what to run, and the `MISSION.md` / `FACTORY_RULES.md` /
+`CLAUDE.md` governance trio no agent may touch — comes from
+[Cole Medin](https://github.com/coleam00)'s
+[dark-factory-experiment](https://github.com/coleam00/dark-factory-experiment).
+(The term itself traces through Dan Shapiro's "dark factory" framing, after
+FANUC's lights-out plants where robots build robots.) Study his repo too; it
+is the clearest statement of the core idea.
+
+What changed here, built on that foundation:
+
+- **No workflow engine.** The original stitches coding sessions together with
+  Archon workflows on a VPS cron. This one is Claude Code alone — a shell
+  orchestrator and runner, triggered by a macOS launchd job in the owner's
+  login session. Fewer moving parts, one machine, fail-closed when logged out.
+- **A brain.** Persistent cross-session memory in a separate git repo —
+  identity, locked decisions, project state — plus `brain-seed.sh`, which
+  writes each lap's record derived from git, never from an agent's claims.
+  Agents never relearn. (The pattern is published as a starter:
+  [brain-starter](https://github.com/RickWyatt-me/brain-starter).)
+- **A graduated dial instead of a fixed autonomy level.** 0–3, every notch a
+  separate explicit human go — and before any notch, `harness/ci.py --prove`
+  must re-prove the gate can still fail. A gate that cannot fail is not a gate.
+- **A marker-verified ladder with mutation proof.** Checks emit counted
+  markers so a silent skip reads as a failure, and the gate is periodically
+  proven against seeded defects, not assumed.
+- **Two stop buttons, both fail closed.** A file on disk that works with the
+  network down, and a phone-editable label; if the stop state cannot be read,
+  nothing dispatches.
+- **A production-database road.** `db-apply.sh` applies merged migrations to
+  prod unattended through three rungs: a static DDL policy, an independent
+  migration judge, and post-apply probes that verify the schema actually moved.
+- **An artifact road.** Internal TestFlight builds for a native mobile app —
+  the factory's output isn't only merged code.
+- **An evolution loop that proposes but does not apply** — recommendations
+  land as documents for a human, with one narrow, judged, kill-switched
+  auto-apply channel for prompt edits only.
+- **Escalation that cannot fail.** Local feed → email → Slack, in that order;
+  a dead webhook degrades to a log line, never to an error, and only
+  "needs a human" ever reaches a phone.
+
 ## Get it
 
 ```bash
