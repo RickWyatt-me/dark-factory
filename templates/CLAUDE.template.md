@@ -23,8 +23,10 @@ builds it — see `FACTORY.md`.
 
 ## Stack
 
-<!-- FILL: the locked stack, one line per layer. Mark it "do not re-litigate
-     without new evidence" if that is your convention. -->
+<!-- FILL: the locked stack, one line per layer. Give the list exactly ONE home —
+     a second copy anywhere (a "locked defaults" section, docs, README) goes stale
+     silently; lock the *rule* ("not re-litigated without new evidence") and point
+     it at this section. -->
 {{STACK}}
 
 ## Naming

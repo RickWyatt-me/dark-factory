@@ -383,23 +383,43 @@ provision_worktree() {      # provision_worktree <path>
 # judged — everything downstream judges the renumbered tree, so nothing merges in a
 # form no judge saw. Any ambiguity escalates; the factory does not guess.
 
+# Node, resolved the way the trigger resolves it — NEVER bare `node`. The tick runs
+# under launchd's AGENT_PATH, which does not contain the nvm bin dir; bare `node` is
+# exit 127 there and resolves fine in every interactive shell, which is exactly how
+# this path's FIRST live run turned a missing binary into a phantom "duplicate
+# migration number" escalation on a branch with no migrations at all (PR #66, run
+# 20260820T171830 — scratch-tested interactively, misfired under the tick).
+# FACTORY_TRIGGER_PROGRAM (config.sh) is the FDA-granted absolute nvm node the whole
+# trigger doctrine is built on; PATH is only the interactive fallback.
+factory_node() {
+  if [ -n "${FACTORY_TRIGGER_PROGRAM:-}" ] && [ -x "$FACTORY_TRIGGER_PROGRAM" ]; then
+    printf '%s' "$FACTORY_TRIGGER_PROGRAM"
+  else
+    command -v node || return 1
+  fi
+}
+
 # A rebase stopped ONLY on supabase/migrations/MIGRATIONS.md is not a content
 # conflict — the index is a generated file ("do not edit by hand"), so the resolution
 # is to regenerate it from the files actually in the tree and continue. Any other
 # unmerged path is a real conflict and stays a human problem: return 1 with the
 # rebase state intact so the caller's abort-and-escalate path reads it.
 settle_index_conflicts() {   # settle_index_conflicts <worktree>  -> 0 rebase completed
-  local wt="$1" gd tries=0 unmerged
+  local wt="$1" gd tries=0 unmerged node_bin
   gd="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  # Resolved ONCE, up front: without node the index cannot be regenerated, so the
+  # conflict genuinely cannot be auto-settled — say so in the rebase log and leave
+  # the existing conflict escalation to a human, which is then an honest message.
+  node_bin="$(factory_node)" || { echo "SETTLE_NODE_UNRESOLVED: no node binary (FACTORY_TRIGGER_PROGRAM unset/missing and none on PATH) - the index cannot be regenerated, leaving the conflict to a human"; return 1; }
   while [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ]; do
     tries=$((tries+1)); [ "$tries" -gt 20 ] && return 1
     unmerged="$(git -C "$wt" diff --name-only --diff-filter=U)"
     [ "$unmerged" = "supabase/migrations/MIGRATIONS.md" ] || return 1
     # Exit 1 here means duplicate numbers — expected mid-race; the file is still
     # written and the post-rebase renumber below settles the duplicate itself.
-    ( cd "$wt" && node scripts/gen-migrations-index.mjs ) || true
+    ( cd "$wt" && "$node_bin" scripts/gen-migrations-index.mjs ) || true
     # Never stage a file that still carries conflict markers: if the generator did
-    # not run (node missing, script absent on an old branch), adding the conflicted
+    # not run (script absent on an old branch, node crashed), adding the conflicted
     # index would commit the markers as content.
     grep -q '^<<<<<<<' "$wt/supabase/migrations/MIGRATIONS.md" && return 1
     git -C "$wt" add supabase/migrations/MIGRATIONS.md || return 1
@@ -417,26 +437,42 @@ settle_index_conflicts() {   # settle_index_conflicts <worktree>  -> 0 rebase co
 # gets the next free number: git mv + the header line's number token + a regenerated
 # index, committed on the branch. That is byte-for-byte the human fix on PR #38, and
 # nothing else: content is untouched, and the guard/gate/judge all run after this.
-# Returns 1 — the caller escalates — when the duplicate cannot be settled without a
-# choice: the generator is red for a reason other than duplicates, a duplicate pair
-# is not exactly one base file + one branch file, or any mechanical step fails.
+# Returns 1 — the caller escalates with the duplicate-number message — ONLY on a
+# genuine duplicate that cannot be settled without a choice (a pair that is not
+# exactly one base file + one branch file, or a file whose line 1 is not the header).
+# Returns 2 — the caller escalates with a MACHINERY message — when the tooling
+# itself fails (node unresolvable, generator crash, git step failure). The first
+# live run of this path conflated the two: a bare `node` that was exit 127 under the
+# tick's PATH read as "duplicate detected" and escalated a migration-less branch
+# (PR #66) with the migration message. Detection is now PURE SHELL — an exit code
+# from a tool is never evidence of a duplicate — and node is only reached for the
+# regeneration step, resolved via factory_node.
 renumber_duplicate_migrations() {   # renumber_duplicate_migrations <worktree>
-  local wt="$1" base_files dupes num keep branch_file f bn next newfile
-  ( cd "$wt" && node scripts/gen-migrations-index.mjs ) >/dev/null 2>&1 && return 0
+  local wt="$1" added base_files dupes num keep extra branch_file f bn next newfile node_bin
+  # CHEAP SKIP FIRST: most branches add no migration at all, and a branch that adds
+  # none cannot be in the race — return before any tooling, any listing, any node.
+  added="$(git -C "$wt" diff --name-only --diff-filter=A "$BASE"..HEAD -- 'supabase/migrations/*.sql' 2>/dev/null || true)"
+  [ -n "$added" ] || return 0
   base_files="$(git ls-tree -r --name-only "$BASE" -- supabase/migrations/ | sed 's|.*/||')"
   dupes="$(ls "$wt/supabase/migrations" | grep -E '^[0-9]{5}_.*\.sql$' | cut -c1-5 | sort | uniq -d)"
-  [ -n "$dupes" ] || return 1
+  [ -n "$dupes" ] || return 0
+  node_bin="$(factory_node)" || { log "RENUMBER_NODE_UNRESOLVED no node binary - cannot regenerate the index after a renumber"; return 2; }
+  # The marker feeds THIS pass's commit message and PR note; append-only would leak
+  # a previous pass's renames into them, so it starts empty every pass.
+  : > "$RUNDIR/RENUMBERED"
   for num in $dupes; do
-    keep=0; branch_file=""
+    keep=0; extra=0; branch_file=""
     for f in "$wt"/supabase/migrations/"${num}"_*.sql; do
       bn="$(basename "$f")"
-      if printf '%s\n' "$base_files" | grep -qxF "$bn"; then keep=$((keep+1)); else branch_file="$bn"; fi
+      if printf '%s\n' "$base_files" | grep -qxF "$bn"; then keep=$((keep+1)); else extra=$((extra+1)); branch_file="$bn"; fi
     done
-    [ -n "$branch_file" ] && [ "$keep" -eq 1 ] || return 1
-    next="$(ls "$wt/supabase/migrations" | grep -E '^[0-9]{5}_' | cut -c1-5 | sort -n | tail -1)"
+    # Exactly one file on EACH side of the pair — two branch files sharing the
+    # number is the same no-mechanical-answer ambiguity as two base files.
+    [ "$extra" -eq 1 ] && [ "$keep" -eq 1 ] || return 1
+    next="$(ls "$wt/supabase/migrations" | grep -E '^[0-9]{5}_.*\.sql$' | cut -c1-5 | sort -n | tail -1)"
     next="$(printf '%05d' $((10#$next + 1)))"
     newfile="${next}_$(printf '%s' "$branch_file" | cut -c7-)"
-    git -C "$wt" mv "supabase/migrations/$branch_file" "supabase/migrations/$newfile" || return 1
+    git -C "$wt" mv "supabase/migrations/$branch_file" "supabase/migrations/$newfile" || return 2
     # Line 1 is the skill-mandated header; only its number token changes. python3, not
     # sed -i (BSD/GNU -i disagree), and it refuses a line 1 that is not the header.
     python3 - "$wt/supabase/migrations/$newfile" "$num" "$next" <<'PY' || return 1
@@ -451,9 +487,10 @@ PY
     echo "$branch_file -> $newfile" >> "$RUNDIR/RENUMBERED"
     log "MIGRATION_RENUMBERED $branch_file -> $newfile — $num is already taken on $BASE under a different name (migration-number race, issue #64)"
   done
-  # Must be green now — a still-red generator means the settle above was not enough.
-  ( cd "$wt" && node scripts/gen-migrations-index.mjs ) >/dev/null 2>&1 || return 1
-  git -C "$wt" add supabase/migrations/ || return 1
+  # The generator's output is kept for diagnosis (renumber.log), never read as a
+  # duplicate verdict: a red exit HERE means the regeneration step itself failed.
+  ( cd "$wt" && "$node_bin" scripts/gen-migrations-index.mjs ) >"$RUNDIR/renumber.log" 2>&1 || return 2
+  git -C "$wt" add supabase/migrations/ || return 2
   git -C "$wt" commit -q \
     -m "chore(factory): renumber migration on rebase - number already taken on base (#$ISSUE_NUM)" \
     -m "Mechanical rewrite by the validate node, BEFORE judging: $(paste -sd ', ' "$RUNDIR/RENUMBERED" 2>/dev/null || echo 'see RENUMBERED') — rename + header number + regenerated index only; migration content untouched. Everything downstream (guard, gate, judge) runs against this tree. Issue #64.
@@ -462,7 +499,7 @@ Epic: factory
 Story: issue-$ISSUE_NUM
 Type: fix
 Learning: none recorded
-Affected: supabase/migrations" || return 1
+Affected: supabase/migrations" || return 2
   return 0
 }
 
@@ -798,10 +835,20 @@ Affected: ${AFFECTED_TOP:-unknown}"
       if [ "$REBASE_OK" = yes ]; then
         # Duplicate-number check runs on EVERY completed rebase, not only the settled
         # ones — the collision is what makes the index conflict, but nothing
-        # guarantees the conflict is what surfaces it.
-        if ! renumber_duplicate_migrations "$RB_WT"; then
+        # guarantees the conflict is what surfaces it. rc 1 and rc 2 are DIFFERENT
+        # failures with DIFFERENT messages: 1 is a genuine duplicate no machine may
+        # settle, 2 is the check's own tooling failing — the first live run sent a
+        # migration-less branch (PR #66) to a human under the migration message
+        # because the two were conflated.
+        RN_RC=0
+        renumber_duplicate_migrations "$RB_WT" || RN_RC=$?
+        if [ "$RN_RC" -ne 0 ]; then
           prepare_worktree_path "$RB_WT"
-          escalate "the branch adds a migration whose 00NNN number is already taken on $BASE and the mechanical renumber could not settle it without a choice (see $RUNDIR/RENUMBERED and $REBASE_LOG if present). A human must renumber per the vox-database-migrations skill; the factory will not guess. (issue #64)"
+          if [ "$RN_RC" -eq 1 ]; then
+            escalate "the branch adds a migration whose 00NNN number is already taken on $BASE and the mechanical renumber could not settle it without a choice (see $RUNDIR/RENUMBERED and $REBASE_LOG if present). A human must renumber per the vox-database-migrations skill; the factory will not guess. (issue #64)"
+          else
+            escalate "the migration-race check could not RUN (node unresolvable or a mechanical git/regeneration step failed - see $RUNDIR/renumber.log and the log above). This is a MACHINERY failure, not a duplicate-number finding; do not renumber anything before reading the logs. (issue #64)"
+          fi
         fi
         prepare_worktree_path "$RB_WT"
         log "REBASED $BRANCH onto $BASE in an isolated worktree; everything below judges the rebased tree"
