@@ -117,6 +117,32 @@ The conservative defaults are the point: dial 0, human signature required,
 no production-DB road, evolution auto-apply OFF, no artifact-build road. Each
 is enabled later by its own human commit, one at a time — or never.
 
+## How work gets in
+
+The factory eats GitHub issues, and the judge reads ONLY the issue as filed —
+so how issues get written matters as much as how they get processed. Two paths:
+
+1. **File one by hand.** Plain words are fine, but it must describe something
+   observable: a bug with reproduction or error output, a feature inside
+   MISSION's scope, performance work with a measurable claim, docs, or tests
+   for uncovered behavior (`FACTORY_RULES` §1 is the triage contract). Each
+   issue is self-contained: its own context, acceptance criteria, and fences.
+   Underspecified-but-workable issues don't bounce — the factory records its
+   assumptions and an independent judge rules on them, holding the merge if a
+   recorded assumption was a real decision.
+2. **Use the intake skill for anything bigger than one lap.**
+   `skills/factory-intake/` is the front door: it detects whether the work fits
+   the factory's territory, sizes the planning depth (PRD → architecture →
+   slice, skipping what the size doesn't warrant), files self-contained issues
+   in dependency order, and hands back the one human act — the list to label.
+
+```bash
+ln -s "$(pwd)/dark-factory/skills/factory-intake" ~/.claude/skills/factory-intake
+```
+
+Either way, nothing runs until a human puts `factory:accepted` on the issue.
+Filing is anyone's job; signing is yours.
+
 ## Layout
 
 | Path | What it is |
